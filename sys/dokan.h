@@ -50,12 +50,16 @@ typedef NTKERNELAPI BOOLEAN DokanPtr_FsRtlCheckLockForOplockRequest(
     _In_ PFILE_LOCK FileLock, _In_ PLARGE_INTEGER AllocationSize);
 typedef NTKERNELAPI BOOLEAN
 DokanPtr_FsRtlAreThereWaitingFileLocks(_In_ PFILE_LOCK FileLock);
+typedef NTSYSAPI VOID NTAPI DokanPtr_RtlDeleteElementGenericTableAvlEx(
+    _In_ PRTL_AVL_TABLE Table, _In_ PVOID NodeOrParent);
 
 // extern GetSystemRoutineAddress
 extern DokanPtr_FsRtlCheckLockForOplockRequest
     *DokanFsRtlCheckLockForOplockRequest;
 extern DokanPtr_FsRtlAreThereWaitingFileLocks
     *DokanFsRtlAreThereWaitingFileLocks;
+extern DokanPtr_RtlDeleteElementGenericTableAvlEx
+    *DokanFsRtlDeleteElementGenericTableAvlEx;
 
 #define DOKAN_DISK_DEVICE_NAME L"\\Device\\Volume"
 #define DOKAN_SYMBOLIC_LINK_NAME L"\\DosDevices\\Global\\Volume"
@@ -352,6 +356,16 @@ typedef struct _DokanResourceDebugInfo {
   ULONG ExclusiveLockCount;
 } DokanResourceDebugInfo, *PDokanResourceDebugInfo;
 
+
+typedef struct _DokanFCBAvlContext {
+  PUNICODE_STRING FileName;
+  PVOID Fcb;
+} DokanFCBAvlContext, *PDokanFCBAvlContext;
+typedef struct _DokanFCBAvlNode {
+  RTL_BALANCED_LINKS AvlHeader;
+  DokanFCBAvlContext Context;
+} DokanFCBAvlNode, *PDokanFCBAvlNode;
+
 typedef struct _DokanVolumeControlBlock {
 
   FSD_IDENTIFIER Identifier;
@@ -363,7 +377,9 @@ typedef struct _DokanVolumeControlBlock {
   ERESOURCE Resource;
   PDEVICE_OBJECT DeviceObject;
   PDokanDCB Dcb;
-  LIST_ENTRY NextFCB;
+
+  RTL_AVL_TABLE FcbTable;
+  PDokanFCBAvlNode PendingTablNodeInsert;
 
   // NotifySync is used by notify directory change
   PNOTIFY_SYNC NotifySync;
@@ -469,8 +485,8 @@ typedef struct _DokanFileControlBlock {
 
   // Locking: Vcb pointer is read-only, no locks needed.
   PDokanVCB Vcb;
-  // Locking: DokanFCBLock{RO,RW} and usually vcb lock
-  LIST_ENTRY NextFCB;
+  // Locking: DokanFCBLock{RO,RW}
+  DokanFCBAvlNode AvlNode;
   // Locking: DokanFCBLock{RO,RW}
   LIST_ENTRY NextCCB;
 

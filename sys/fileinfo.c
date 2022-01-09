@@ -353,8 +353,8 @@ VOID FlushFcb(__in PREQUEST_CONTEXT RequestContext, __in PDokanFCB Fcb,
 VOID FlushAllCachedFcb(__in PREQUEST_CONTEXT RequestContext,
                        __in PDokanFCB fcbRelatedTo,
                        __in_opt PFILE_OBJECT fileObject) {
-  PLIST_ENTRY thisEntry, nextEntry, listHead;
   PDokanFCB fcb = NULL;
+  PDokanFCBAvlContext fcbAvlContext = NULL;
 
   if (fcbRelatedTo == NULL) {
     return;
@@ -371,13 +371,11 @@ VOID FlushAllCachedFcb(__in PREQUEST_CONTEXT RequestContext,
 
   DokanVCBLockRW(fcbRelatedTo->Vcb);
 
-  listHead = &fcbRelatedTo->Vcb->NextFCB;
-
-  for (thisEntry = listHead->Flink; thisEntry != listHead;
-       thisEntry = nextEntry) {
-    nextEntry = thisEntry->Flink;
-
-    fcb = CONTAINING_RECORD(thisEntry, DokanFCB, NextFCB);
+  for (fcbAvlContext =
+           RtlEnumerateGenericTableAvl(&RequestContext->Vcb->FcbTable, TRUE);
+       fcbAvlContext != NULL; fcbAvlContext = RtlEnumerateGenericTableAvl(
+                                  &RequestContext->Vcb->FcbTable, FALSE)) {
+    fcb = (PDokanFCB)fcbAvlContext->Fcb;
 
     if (DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)) {
       DOKAN_LOG_FINE_IRP(RequestContext, "FCB=%p is directory so skip it.",

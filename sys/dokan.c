@@ -44,8 +44,12 @@ ULONG DokanMdlSafePriority = 0;
 FAST_IO_DISPATCH FastIoDispatch;
 FAST_IO_CHECK_IF_POSSIBLE DokanFastIoCheckIfPossible;
 
-DokanPtr_FsRtlCheckLockForOplockRequest *DokanFsRtlCheckLockForOplockRequest = NULL;
-DokanPtr_FsRtlAreThereWaitingFileLocks *DokanFsRtlAreThereWaitingFileLocks = NULL;
+DokanPtr_FsRtlCheckLockForOplockRequest *DokanFsRtlCheckLockForOplockRequest =
+    NULL;
+DokanPtr_FsRtlAreThereWaitingFileLocks *DokanFsRtlAreThereWaitingFileLocks =
+    NULL;
+DokanPtr_RtlDeleteElementGenericTableAvlEx
+    *DokanFsRtlDeleteElementGenericTableAvlEx = NULL;
 
 BOOLEAN
 DokanFastIoCheckIfPossible(__in PFILE_OBJECT FileObject,
@@ -213,6 +217,10 @@ VOID InitMultiVersionResources() {
     RtlInitUnicodeString(&SystemRoutineName, L"FsRtlAreThereWaitingFileLocks");
     DokanFsRtlAreThereWaitingFileLocks =
         (DokanPtr_FsRtlAreThereWaitingFileLocks *)MmGetSystemRoutineAddress(
+            &SystemRoutineName);
+    RtlInitUnicodeString(&SystemRoutineName, L"RtlDeleteElementGenericTableAvlEx");
+    DokanFsRtlDeleteElementGenericTableAvlEx =
+        (DokanPtr_RtlDeleteElementGenericTableAvlEx *)MmGetSystemRoutineAddress(
             &SystemRoutineName);
   }
 }

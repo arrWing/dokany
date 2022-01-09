@@ -27,8 +27,10 @@ const UNICODE_STRING g_KeepAliveFileName =
 const UNICODE_STRING g_NotificationFileName =
     RTL_CONSTANT_STRING(DOKAN_NOTIFICATION_FILE_NAME);
 
-// We must NOT call without VCB lock
-PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
+// Create a new instance of DokanFCB and insert in VolumeControlBlock Fcb table.
+// Must be called with VCB lock
+PDokanFCB DokanAllocateFCB(__in PREQUEST_CONTEXT RequestContext,
+                           __in PDokanVCB Vcb, __in PWCHAR FileName,
                            __in ULONG FileNameLength) {
   PDokanFCB fcb = ExAllocateFromLookasideListEx(&g_DokanFCBLookasideList);
 
@@ -84,7 +86,28 @@ PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
   fcb->FileName.MaximumLength = (USHORT)FileNameLength;
 
   InitializeListHead(&fcb->NextCCB);
-  InsertTailList(&Vcb->NextFCB, &fcb->NextFCB);
+
+  fcb->AvlNode.Context.FileName = &fcb->FileName;
+  fcb->AvlNode.Context.Fcb = fcb;
+  Vcb->PendingTablNodeInsert = &fcb->AvlNode;
+  BOOLEAN newElement = FALSE;
+  PDokanFCBAvlContext fcbAvlContext =
+      RtlInsertElementGenericTableAvl(&Vcb->FcbTable, &fcb->AvlNode.Context,
+                                      sizeof(DokanFCBAvlContext), &newElement);
+  Vcb->PendingTablNodeInsert = NULL;
+  ASSERT(newElement);
+  if (!fcbAvlContext) {
+    DOKAN_LOG_FINE_IRP(RequestContext, "Failed to insert Fcb in table.");
+    FsRtlUninitializeOplock(DokanGetFcbOplock(fcb));
+    FsRtlTeardownPerStreamContexts(&fcb->AdvancedFCBHeader);
+    ExDeleteResourceLite(fcb->AdvancedFCBHeader.Resource);
+    ExFreeToLookasideListEx(&g_DokanEResourceLookasideList,
+                            fcb->AdvancedFCBHeader.Resource);
+    ExDeleteResourceLite(&fcb->PagingIoResource);
+    ExFreeToLookasideListEx(&g_DokanFCBLookasideList, fcb);
+    return NULL;
+  }
+  ASSERT(fcbAvlContext == &fcb->AvlNode.Context);
 
   InterlockedIncrement(&Vcb->FcbAllocated);
   InterlockedAnd64(&Vcb->ValidFcbMask, (LONG64)fcb);
@@ -92,42 +115,27 @@ PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
   return fcb;
 }
 
-PDokanFCB DokanGetFCB(__in PREQUEST_CONTEXT RequestContext, __in PWCHAR FileName,
-                      __in ULONG FileNameLength, BOOLEAN CaseSensitive) {
-  PLIST_ENTRY thisEntry, nextEntry, listHead;
+PDokanFCB DokanGetFCB(__in PREQUEST_CONTEXT RequestContext,
+                      __in PWCHAR FileName, __in ULONG FileNameLength) {
   PDokanFCB fcb = NULL;
   UNICODE_STRING fn = DokanWrapUnicodeString(FileName, FileNameLength);
+  DokanFCBAvlContext lookupFcbAvlContext;
+  lookupFcbAvlContext.FileName = &fn;
 
   UNREFERENCED_PARAMETER(RequestContext);
 
   DokanVCBLockRW(RequestContext->Vcb);
 
-  // search the FCB which is already allocated
-  // (being used now)
-  listHead = &RequestContext->Vcb->NextFCB;
-
-  for (thisEntry = listHead->Flink; thisEntry != listHead;
-       thisEntry = nextEntry) {
-
-    nextEntry = thisEntry->Flink;
-
-    fcb = CONTAINING_RECORD(thisEntry, DokanFCB, NextFCB);
-    DOKAN_LOG_FINE_IRP(RequestContext, "Has entry FCB=%p FileName=\"%wZ\" FileCount: %lu", fcb,
-                  &fcb->FileName, fcb->FileCount);
-    if (fcb->FileName.Length == FileNameLength  // FileNameLength in bytes
-        && RtlEqualUnicodeString(&fn, &fcb->FileName, !CaseSensitive)) {
-      // we have the FCB which is already allocated and used
-      DOKAN_LOG_FINE_IRP(RequestContext, "Found existing FCB=%p", fcb);
-      break;
-    }
-
-    fcb = NULL;
-  }
+  DOKAN_LOG_FINE_IRP(RequestContext, "Lookup FCB for FileName: %wZ",
+                     lookupFcbAvlContext.FileName);
+  PDokanFCBAvlContext fcbAvlContext = (PDokanFCBAvlContext)RtlLookupElementGenericTableAvl(
+      &RequestContext->Vcb->FcbTable, &lookupFcbAvlContext);
 
   // we don't have FCB
-  if (fcb == NULL) {
+  if (fcbAvlContext == NULL) {
     DOKAN_LOG_FINE_IRP(RequestContext, "No matching FCB found.");
-    fcb = DokanAllocateFCB(RequestContext->Vcb, FileName, FileNameLength);
+    fcb = DokanAllocateFCB(RequestContext, RequestContext->Vcb, FileName,
+                           FileNameLength);
 
     // no memory?
     if (fcb == NULL) {
@@ -148,6 +156,7 @@ PDokanFCB DokanGetFCB(__in PREQUEST_CONTEXT RequestContext, __in PWCHAR FileName
 
     // we already have FCB
   } else {
+    fcb = (PDokanFCB)fcbAvlContext->Fcb;
     DokanCancelFcbGarbageCollection(fcb, &fn);
   }
 
@@ -213,7 +222,13 @@ DokanFreeFCB(__in PDokanVCB Vcb, __in PDokanFCB Fcb) {
 
 VOID DokanDeleteFcb(__in PDokanVCB Vcb, __in PDokanFCB Fcb) {
   ++Vcb->VolumeMetrics.FcbDeletions;
-  RemoveEntryList(&Fcb->NextFCB);
+  if (DokanFsRtlDeleteElementGenericTableAvlEx) {
+    DokanFsRtlDeleteElementGenericTableAvlEx(&Vcb->FcbTable, &Fcb->AvlNode);
+  } else {
+    BOOL removed =
+        RtlDeleteElementGenericTableAvl(&Vcb->FcbTable, &Fcb->AvlNode.Context);
+    ASSERT(removed);
+  }
   InitializeListHead(&Fcb->NextCCB);
 
   DOKAN_LOG_("Free FCB:%p", Fcb);
@@ -418,4 +433,34 @@ void DokanStartFcbGarbageCollector(PDokanVCB Vcb) {
                             (PVOID *)&Vcb->FcbGarbageCollectorThread, NULL);
 
   ZwClose(thread);
+}
+
+RTL_GENERIC_COMPARE_RESULTS DokanCompareFcb(__in struct _RTL_AVL_TABLE *Table,
+                                            __in PVOID FirstStruct,
+                                            __in PVOID SecondStruct) {
+  PDokanVCB vcb = (PDokanVCB)Table->TableContext;
+  PDokanFCBAvlContext firstFcbAvlContext = (PDokanFCBAvlContext)FirstStruct;
+  PDokanFCBAvlContext secondFcbAvlContext = (PDokanFCBAvlContext)SecondStruct;
+  LONG result = RtlCompareUnicodeString(
+      firstFcbAvlContext->FileName, secondFcbAvlContext->FileName,
+      vcb->Dcb->MountOptions & DOKAN_EVENT_CASE_SENSITIVE);
+  DOKAN_LOG_("First: 0x%p %wZ Second: 0x%p %wZ - Result: %ld", firstFcbAvlContext->Fcb,
+             firstFcbAvlContext->FileName, secondFcbAvlContext->Fcb, secondFcbAvlContext->FileName, result);
+  if (result < 0) {
+    return GenericLessThan;
+  } else if (result > 0) {
+    return GenericGreaterThan;
+  }
+  return GenericEqual;
+}
+
+PVOID DokanAllocateFcbAvl(__in struct _RTL_AVL_TABLE *Table,
+                          __in CLONG ByteSize) {
+  ASSERT(ByteSize == sizeof(DokanFCBAvlNode));
+  return ((PDokanVCB)Table->TableContext)->PendingTablNodeInsert;
+}
+
+VOID DokanFreeFcbAvl(__in struct _RTL_AVL_TABLE *Table, __in PVOID Buffer) {
+  UNREFERENCED_PARAMETER(Table);
+  UNREFERENCED_PARAMETER(Buffer);
 }
